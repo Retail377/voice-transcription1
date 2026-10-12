@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhisperLiveKit 实时转写</title>
+    <style>
+        body { font-family: sans-serif; background: #0b0f1c; color: #eef3ff; display: flex; justify-content: center; padding: 20px; }
+        .container { width: 100%; max-width: 800px; }
+        #transcript { height: 400px; overflow-y: auto; background: #1a1f33; border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+        .line { margin-bottom: 10px; }
+        .buffer { color: #888; font-style: italic; }
+        .committed { color: #fff; }
+        .controls { display: flex; gap: 10px; }
+        button { padding: 10px 20px; border-radius: 20px; border: none; background: #3b4b7a; color: white; cursor: pointer; }
+        button:disabled { opacity: 0.5; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎙️ 实时语音转写 (WhisperLiveKit)</h1>
+        <div id="transcript"></div>
+        <div class="controls">
+            <button id="startBtn">开始录音</button>
+            <button id="stopBtn" disabled>停止录音</button>
+        </div>
+    </div>
+
+    <script>
+        const transcriptEl = document.getElementById('transcript');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+
+        let ws;
+        let audioContext;
+        let mediaStream;
+        let workletNode;
+        let isRecording = false;
+
+        // 1. 初始化 WebSocket 连接
+        function connectWebSocket() {
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            // 连接到我们后端的 /asr 端点
+            ws = new WebSocket(`${protocol}//${location.host}/asr`);
+
+            ws.onopen = () => console.log('WebSocket 已连接');
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                updateTranscript(data);
+            };
+            ws.onclose = () => console.log('WebSocket 已断开');
+            ws.onerror = (err) => console.error('WebSocket 错误', err);
+        }
+
+        // 2. 更新转写界面 (处理实时缓冲和最终提交)
+        function updateTranscript(data) {
+            // WhisperLiveKit 的结果通常包含 'lines' 数组，每行有 'text' 和 'is_final' 或类似标记
+            // 具体字段请参考你使用的 WhisperLiveKit 版本文档，这里做通用处理
+            if (!data.lines) return;
+            
+            transcriptEl.innerHTML = ''; // 简单清空重绘
+            data.lines.forEach(line => {
+                const div = document.createElement('div');
+                div.className = line.is_final ? 'line committed' : 'line buffer';
+                div.textContent = line.text;
+                transcriptEl.appendChild(div);
+            });
+            transcriptEl.scrollTop = transcriptEl.scrollHeight;
+        }
+
+        // 3. 开始录音 (采集 16kHz PCM)
+        async function startRecording() {
+            if (isRecording) return;
+            try {
+                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioContext = new AudioContext({ sampleRate: 16000 }); // 关键：目标采样率 16kHz
+                
+                // 加载 AudioWorklet 处理器脚本
+                await audioContext.audioWorklet.addModule(URL.createObjectURL(new Blob([`
+                    class RecorderProcessor extends AudioWorkletProcessor {
+                        process(inputs) {
+                            const input = inputs[0];
+                            if (input.length > 0) {
+                                // 发送第一个声道的 Float32 数据给主线程
+                                this.port.postMessage(input[0]);
+                            }
+                            return true;
+                        }
+                    }
+                    registerProcessor('recorder-processor', RecorderProcessor);
+                `], { type: 'application/javascript' })));
+
+                const source = audioContext.createMediaStreamSource(mediaStream);
+                workletNode = new AudioWorkletNode(audioContext, 'recorder-processor');
+                
+                workletNode.port.onmessage = (e) => {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        // 将 Float32Array 转为后端需要的格式（WhisperLiveKit 通常接受原始字节或 Float32）
+                        // 这里直接发送 Float32 数组的 buffer
+                        ws.send(e.data.buffer);
+                    }
+                };
+
+                source.connect(workletNode);
+                // 不连接到 destination，避免回声
+                
+                isRecording = true;
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                transcriptEl.innerHTML = ''; // 清空旧记录
+            } catch (err) {
+                console.error('无法开始录音:', err);
+                alert('无法访问麦克风，请确保使用 HTTPS 或 localhost。');
+            }
+        }
+
+        // 4. 停止录音
+        function stopRecording() {
+            isRecording = false;
+            if (workletNode) workletNode.disconnect();
+            if (audioContext) audioContext.close();
+            if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+            
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            // 可以发送一个结束信号给后端（如果 WhisperLiveKit 支持）
+        }
+
+        startBtn.addEventListener('click', () => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) connectWebSocket();
+            startRecording();
+        });
+        stopBtn.addEventListener('click', stopRecording);
+
+        // 页面加载时先建立连接
+        connectWebSocket();
+    </script>
+</body>
+</html>

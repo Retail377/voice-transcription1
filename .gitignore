@@ -1,0 +1,15 @@
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.idea/
+.vscode/
+.cache/
+*.bin
+*.pt
+*.onnx
+.DS_Store
+Thumbs.db
+技术栈.txt
